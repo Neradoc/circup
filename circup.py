@@ -554,17 +554,14 @@ def get_dependencies(*requested_libraries, mod_names, to_install=()):
         # Convert tuple to list and force all to lowercase, Clean the names
         l = clean_library_name(l.lower())
         if l in NOT_MCU_LIBRARIES:
-            logger.info("Skipping %s. It is not for microcontroller installs.", l)
+            logger.warning("Skipping %s. It is not for microcontroller installs.", l)
         else:
             try:
                 # Don't process any names we can't find in mod_names
                 mod_names[l]  # pylint: disable=pointless-statement
                 _requested_libraries.append(l)
             except KeyError:
-                click.secho(
-                    f"WARNING:\n\t{l} is not a known CircuitPython library.",
-                    fg="yellow",
-                )
+                logger.error(f"{l} is not a known CircuitPython library.")
 
     if not _requested_libraries:
         # If nothing is requested, we're done
@@ -961,6 +958,31 @@ def install(ctx, modules, py, requirement):  # pragma: no cover
         requested_installs = sorted(libraries_from_requirements(requirements_txt))
     else:
         requested_installs = sorted(modules)
+
+    # test that the requested installs are valid
+    wrong_modules = False
+    for l in requested_installs:
+        # Convert tuple to list and force all to lowercase, Clean the names
+        l = clean_library_name(l.lower())
+        if l in NOT_MCU_LIBRARIES:
+            click.secho(
+                f"WARNING:\n\t{l} is not for microcontroller installs.",
+                fg="yellow",
+            )
+            wrong_modules = True
+        elif l not in mod_names:
+            click.secho(
+                f"WARNING:\n\t{l} is not a known CircuitPython library.",
+                fg="yellow",
+            )
+            wrong_modules = True
+    if wrong_modules:
+        click.secho(
+            f"FATAL ERROR:\n\tCannot continue with invalid modules.",
+            fg="red",
+        )
+        return
+
     click.echo(f"Searching for dependencies for: {requested_installs}")
     to_install = get_dependencies(requested_installs, mod_names=mod_names)
     if to_install is not None:
