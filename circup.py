@@ -517,7 +517,16 @@ def get_circuitpython_version(device_path):
     :return: The version string for CircuitPython running on the connected
              board.
     """
-    with open(os.path.join(device_path, "boot_out.txt")) as boot:
+    boot_out_file = os.path.join(device_path, "boot_out.txt")
+    if not os.path.exists(boot_out_file):
+        click.secho(
+            "FATAL ERROR:\n"
+            "\tboot_out.txt file is missing\n"
+            "\tPath invalid or not a Circuitpython drive.",
+            fg="red",
+        )
+        sys.exit(1)
+    with open(boot_out_file) as boot:
         circuit_python, _ = boot.read().split(";")
     return circuit_python.split(" ")[-3]
 
