@@ -550,7 +550,7 @@ def get_dependencies(*requested_libraries, mod_names, to_install=()):
                 mod_names[l]  # pylint: disable=pointless-statement
                 _requested_libraries.append(l)
             except KeyError:
-                logger.error(f"{l} is not a known CircuitPython library.")
+                logger.error("%s is not a known CircuitPython library.", l)
 
     if not _requested_libraries:
         # If nothing is requested, we're done
@@ -934,7 +934,7 @@ def install(ctx, modules, py, requirement):  # pragma: no cover
             wrong_modules = True
     if wrong_modules:
         click.secho(
-            f"Error: cannot continue with invalid modules.",
+            "Error: cannot continue with invalid modules.",
             fg="red",
         )
         sys.exit(1)
