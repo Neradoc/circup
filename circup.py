@@ -101,6 +101,14 @@ class Bundle:
         self.dir = os.path.join(DATA_DIR, vendor, bundle_id + "-{platform}")
         self.zip = os.path.join(DATA_DIR, bundle_id + "-{platform}.zip")
         self.url_format = self.url + "/download/{tag}/" + self.urlzip
+        self.dependencies_url = (
+            self.url + "/download/{tag}/" + bundle_id + "-{tag}.json"
+        )
+        self.dependencies_file = os.path.join(
+            DATA_DIR, vendor, bundle_id + "-{tag}.json"
+        )
+        # content of the requirements json file
+        self._requirements = None
         # tag
         self._current = None
         self._latest = None
@@ -171,6 +179,37 @@ class Bundle:
         if self._latest is None:
             self._latest = get_latest_release_from_url(self.url + "/latest")
         return self._latest
+
+    @property
+    def requirements(self):
+        """
+        Lazy load the requirements JSON file.
+        """
+        if self._requirements is not None:
+            return self._requirements
+        try:
+            ensure_latest_bundle(self)
+            with open(self.dependencies_file.format(tag=self.current_tag), "rb") as fp:
+                self._requirements = json.load(fp)
+                return self._requirements
+        except json.decoder.JSONDecodeError:
+            logger.warning("Module %s dependencies error: invalid JSON", self.key)
+            raise
+
+    def get_requirements_file(self):
+        """
+        Download the requirements JSON file.
+        """
+        url = self.dependencies_url.format(tag=self.current_tag)
+        response = requests.get(url)
+        # pylint: disable=no-member
+        if response.status_code != requests.codes.ok:
+            logger.warning("Bundle %s: unable to connect to %s", self.key, url)
+            response.raise_for_status()
+        # pylint: enable=no-member
+        with open(self.dependencies_file.format(tag=self.current_tag), "wb") as fp:
+            fp.write(response.content)
+        self._requirements = None
 
     def __repr__(self):
         """
@@ -433,6 +472,11 @@ def ensure_latest_bundle(bundle):
     tag = bundle.latest_tag
     do_update = False
     if tag == bundle.current_tag:
+        if not os.path.isfile(bundle.dependencies_file.format(tag=tag)):
+            # missing dependencies file (circup updated on existing install)
+            do_update = True
+        elif os.path.getsize(bundle.dependencies_file.format(tag=tag)) == 0:
+            do_update = True
         for platform in PLATFORMS:
             # missing directories (new platform added on an existing install
             # or side effect of pytest or network errors)
@@ -674,6 +718,8 @@ def get_bundle(bundle, tag):
             shutil.rmtree(temp_dir)
         with zipfile.ZipFile(temp_zip, "r") as zfile:
             zfile.extractall(temp_dir)
+    # the requirements file (in the repo, not currently in the zip)
+    bundle.get_requirements_file()
     bundle.current_tag = tag
     click.echo("\nOK\n")
 
@@ -776,11 +822,7 @@ def get_dependencies(*requested_libraries, mod_names, to_install=()):
             _to_install = _to_install + (library,)
             # get the requirements.txt from bundle
             bundle = mod_names[library]["bundle"]
-            requirements_txt = bundle.requirements_for(library)
-            if requirements_txt:
-                _requested_libraries.extend(
-                    libraries_from_requirements(requirements_txt)
-                )
+            _requested_libraries.extend(get_requirements(bundle, library))
         # we've processed this library, remove it from the list
         _requested_libraries.remove(library)
 
@@ -857,6 +899,26 @@ def get_modules(path):
             # No version metadata found.
             result[name] = {"path": dm, "mpy": bool(mpy_files)}
     return result
+
+
+def get_requirements(bundle, library_name):
+    """
+    Return a string of the module dependencies from the dependencies json.
+    NOTE: This only looks at the py bundle. No known differences in the mpy
+    bundle for requirements.txt
+
+    :param Bundle bundle: the target Bundle object.
+    :param str library_name: CircuitPython library name.
+    :return: set(str) the list of required modules (or empty).
+    """
+    deps_list = set()
+    if library_name in bundle.requirements:
+        deps = bundle.requirements[library_name]["dependencies"]
+        for sub_dep in deps:
+            if sub_dep not in deps_list:
+                deps_list |= get_requirements(bundle, sub_dep)
+            deps_list.add(sub_dep)
+    return deps_list
 
 
 # pylint: disable=too-many-locals,too-many-branches
