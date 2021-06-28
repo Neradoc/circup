@@ -44,7 +44,7 @@ NOT_MCU_LIBRARIES = [
     "pyserial",
 ]
 #: The version of CircuitPython found on the connected device.
-CPY_VERSION = ""
+CPY_VERSION = None
 #: Adafruit bundle repository
 BUNDLE_ADAFRUIT = "adafruit/Adafruit_CircuitPython_Bundle"
 #: Community bundle repository
@@ -275,7 +275,7 @@ class Module:
         self.bundle_path = None
         if self.mpy:
             # Byte compiled, now check CircuitPython version.
-            major_version = CPY_VERSION.split(".")[0]
+            major_version = CPY_VERSION.major
             bundle_platform = "{}mpy".format(major_version)
         else:
             # Regular Python
@@ -322,14 +322,9 @@ class Module:
         if not self.mpy:
             return False
         try:
-            cpv = VersionInfo.parse(CPY_VERSION)
-        except ValueError as ex:
-            logger.warning("CircuitPython has incorrect semver value.")
-            logger.warning(ex)
-        try:
-            if self.min_version and cpv < VersionInfo.parse(self.min_version):
+            if self.min_version and CPY_VERSION < VersionInfo.parse(self.min_version):
                 return True  # CP version too old
-            if self.max_version and cpv >= VersionInfo.parse(self.max_version):
+            if self.max_version and CPY_VERSION >= VersionInfo.parse(self.max_version):
                 return True  # MPY version too old
         except (TypeError, ValueError) as ex:
             logger.warning(
@@ -455,7 +450,7 @@ def completion_for_install(ctx, param, incomplete):
     """
     # pylint: disable=unused-argument
     available_modules = get_bundle_versions(get_bundles_list(), avoid_download=True)
-    module_names = {m.replace(".py", "") for m in available_modules}
+    module_names = set(available_modules)
     if incomplete:
         module_names = [name for name in module_names if name.startswith(incomplete)]
     return sorted(module_names)
@@ -476,6 +471,7 @@ def ensure_latest_bundle(bundle):
             # missing dependencies file (circup updated on existing install)
             do_update = True
         elif os.path.getsize(bundle.dependencies_file.format(tag=tag)) == 0:
+            # empty dependencies file
             do_update = True
         for platform in PLATFORMS:
             # missing directories (new platform added on an existing install
@@ -506,7 +502,7 @@ def ensure_latest_bundle(bundle):
 
 def extract_metadata(path):
     """
-    Given an file path, return a dictionary containing metadata extracted from
+    Given a file path, return a dictionary containing metadata extracted from
     dunder attributes found therein. Works with both .py and .mpy files.
 
     For Python source files, such metadata assignments should be simple and
@@ -529,7 +525,7 @@ def extract_metadata(path):
         with open(path, encoding="utf-8") as source_file:
             content = source_file.read()
         #: The regex used to extract ``__version__`` and ``__repo__`` assignments.
-        dunder_key_val = r"""(__\w+__)\s*=\s*(?:['"]|\(\s)(.+)['"]"""
+        dunder_key_val = r"""__(\w+)__\s*=\s*(?:['"]|\(\s)(.+)['"]"""
         for match in re.findall(dunder_key_val, content):
             result[match[0]] = str(match[1])
         if result:
@@ -563,7 +559,7 @@ def extract_metadata(path):
                     end = loc  # Up to the start of the __version__.
                     version = content[start:end]  # Slice the version number.
                     # Create a string version as metadata in the result.
-                    result = {"__version__": version.decode("utf-8"), "mpy": True}
+                    result = {"version": version.decode("utf-8"), "mpy": True}
                     break  # Nothing more to do.
                 offset += 1  # ...and again but backtrack by one.
         if compatibility:
@@ -659,10 +655,10 @@ def find_modules(device_path, bundles_list):
             if name in bundle_modules:
                 path = device_metadata["path"]
                 bundle_metadata = bundle_modules[name]
-                repo = bundle_metadata.get("__repo__")
+                repo = bundle_metadata.get("repo")
                 bundle = bundle_metadata.get("bundle")
-                device_version = device_metadata.get("__version__")
-                bundle_version = bundle_metadata.get("__version__")
+                device_version = device_metadata.get("version")
+                bundle_version = bundle_metadata.get("version")
                 mpy = device_metadata["mpy"]
                 compatibility = device_metadata.get("compatibility", (None, None))
                 result.append(
@@ -739,9 +735,7 @@ def get_bundle_versions(bundles_list, avoid_download=False):
     for bundle in bundles_list:
         if not avoid_download or not os.path.isdir(bundle.lib_dir("py")):
             ensure_latest_bundle(bundle)
-        path = bundle.lib_dir("py")
-        path_modules = get_modules(path)
-        for name, module in path_modules.items():
+        for name, module in bundle.requirements.items():
             module["bundle"] = bundle
             if name not in all_the_modules:  # here we decide the order of priority
                 all_the_modules[name] = module
@@ -779,56 +773,38 @@ def get_circuitpython_version(device_path):
     return circuit_python.split(" ")[-3]
 
 
-def get_dependencies(*requested_libraries, mod_names, to_install=()):
+def get_dependencies(requested_libraries, available_modules):
     """
     Return a list of other CircuitPython libraries
 
     :param tuple requested_libraries: The libraries to search for dependencies
-    :param object mod_names:  All the modules metadata from bundle
-    :param list(str) to_install: Modules already selected for installation.
+    :param object available_modules:  All the modules metadata from bundles
     :return: tuple of module names to install which we build
     """
-    # Internal variables
-    _to_install = to_install
-    _requested_libraries = []
-    _rl = requested_libraries[0]
-
-    if not requested_libraries[0]:
-        # If nothing is requested, we're done
-        return _to_install
-
-    for l in _rl:
-        # Convert tuple to list and force all to lowercase, Clean the names
-        l = clean_library_name(l.lower())
-        if l in NOT_MCU_LIBRARIES:
+    for lib in map(str.lower, requested_libraries):
+        # Clean the names and lowercase
+        l = clean_library_name(lib)
+        if l in NOT_MCU_LIBRARIES:  # this should no longer happen
             logger.info("Skipping %s. It is not for microcontroller installs.", l)
-        else:
-            try:
-                # Don't process any names we can't find in mod_names
-                mod_names[l]  # pylint: disable=pointless-statement
-                _requested_libraries.append(l)
-            except KeyError:
-                click.secho(
-                    f"WARNING:\n\t{l} is not a known CircuitPython library.",
-                    fg="yellow",
-                )
+            requested_libraries.remove(lib)
+            continue
+        if lib not in available_modules and l not in available_modules:
+            requested_libraries.remove(lib)
+            click.secho(
+                f"WARNING:\n\t{l} is not a known CircuitPython library.", fg="yellow"
+            )
 
-    if not _requested_libraries:
+    if not requested_libraries:
         # If nothing is requested, we're done
-        return _to_install
+        return []
 
-    for library in _requested_libraries:
-        if library not in _to_install:
-            _to_install = _to_install + (library,)
-            # get the requirements.txt from bundle
-            bundle = mod_names[library]["bundle"]
-            _requested_libraries.extend(get_requirements(bundle, library))
-        # we've processed this library, remove it from the list
-        _requested_libraries.remove(library)
+    to_install = set()
+    for library in requested_libraries:
+        if library not in to_install:
+            to_install.add(library)
+            to_install |= get_requirements(available_modules, library)
 
-        return get_dependencies(
-            tuple(_requested_libraries), mod_names=mod_names, to_install=_to_install
-        )
+    return to_install
 
 
 def get_device_versions(device_path):
@@ -891,7 +867,7 @@ def get_modules(path):
         all_files = py_files + mpy_files
         for source in [f for f in all_files if not os.path.basename(f).startswith(".")]:
             metadata = extract_metadata(source)
-            if "__version__" in metadata:
+            if "version" in metadata:
                 metadata["path"] = dm
                 result[name] = metadata
                 break
@@ -901,29 +877,27 @@ def get_modules(path):
     return result
 
 
-def get_requirements(bundle, library_name):
+def get_requirements(available_modules, library_name):
     """
-    Return a string of the module dependencies from the dependencies json.
-    NOTE: This only looks at the py bundle. No known differences in the mpy
-    bundle for requirements.txt
+    Return a list of the module dependencies from the dependencies json files.
 
-    :param Bundle bundle: the target Bundle object.
+    :param dict requirements: the dependencies table.
     :param str library_name: CircuitPython library name.
     :return: set(str) the list of required modules (or empty).
     """
     deps_list = set()
-    if library_name in bundle.requirements:
-        deps = bundle.requirements[library_name]["dependencies"]
+    if library_name in available_modules:
+        deps = available_modules[library_name]["dependencies"]
         for sub_dep in deps:
             if sub_dep not in deps_list:
-                deps_list |= get_requirements(bundle, sub_dep)
+                deps_list |= get_requirements(available_modules, sub_dep)
             deps_list.add(sub_dep)
     return deps_list
 
 
 # pylint: disable=too-many-locals,too-many-branches
 def install_module(
-    device_path, device_modules, name, py, mod_names
+    device_path, device_modules, name, py, available_modules
 ):  # pragma: no cover
     """
     Finds a connected device and installs a given module name if it
@@ -936,54 +910,45 @@ def install_module(
     :param str name: Name of module to install
     :param bool py: Boolean to specify if the module should be installed from
                     source or from a pre-compiled module
-    :param mod_names: Dictionary of metadata from modules that can be generated
-                       with get_bundle_versions()
+    :param available_modules: Dictionary of metadata from modules that can be
+                              generated with get_bundle_versions()
     """
     if not name:
         click.echo("No module name(s) provided.")
-    elif name in mod_names:
-        library_path = os.path.join(device_path, "lib")
-        if not os.path.exists(library_path):  # pragma: no cover
-            os.makedirs(library_path)
-        metadata = mod_names[name]
+    elif name in available_modules:
+        device_library_path = os.path.join(device_path, "lib")
+        if not os.path.exists(device_library_path):  # pragma: no cover
+            os.makedirs(device_library_path)
+
+        metadata = available_modules[name]
         bundle = metadata["bundle"]
         # Grab device modules to check if module already installed
         if name in device_modules:
             click.echo("'{}' is already installed.".format(name))
             return
+
         if py:
-            # Use Python source for module.
-            source_path = metadata["path"]  # Path to Python source version.
-            if os.path.isdir(source_path):
-                target = os.path.basename(os.path.dirname(source_path))
-                target_path = os.path.join(library_path, target)
-                # Copy the directory.
-                shutil.copytree(source_path, target_path)
-            else:
-                target = os.path.basename(source_path)
-                target_path = os.path.join(library_path, target)
-                # Copy file.
-                shutil.copyfile(source_path, target_path)
+            bundle_platform = "py"
+            extension = ".py"
         else:
-            # Use pre-compiled mpy modules.
-            module_name = os.path.basename(metadata["path"]).replace(".py", ".mpy")
-            if not module_name:
-                # Must be a directory based module.
-                module_name = os.path.basename(os.path.dirname(metadata["path"]))
-            major_version = CPY_VERSION.split(".")[0]
+            major_version = CPY_VERSION.major
             bundle_platform = "{}mpy".format(major_version)
-            bundle_path = os.path.join(bundle.lib_dir(bundle_platform), module_name)
-            if os.path.isdir(bundle_path):
-                target_path = os.path.join(library_path, module_name)
-                # Copy the directory.
-                shutil.copytree(bundle_path, target_path)
-            elif os.path.isfile(bundle_path):
-                target = os.path.basename(bundle_path)
-                target_path = os.path.join(library_path, target)
-                # Copy file.
-                shutil.copyfile(bundle_path, target_path)
-            else:
-                raise IOError("Cannot find compiled version of module.")
+            extension = ".mpy"
+        if metadata["package"]:
+            extension = ""
+
+        module_file = name + extension
+        bundle_path = os.path.join(bundle.lib_dir(bundle_platform), module_file)
+        target_path = os.path.join(device_library_path, module_file)
+
+        if os.path.isdir(bundle_path):  # metadata["package"]
+            # Copy the directory.
+            shutil.copytree(bundle_path, target_path)
+        elif os.path.isfile(bundle_path):
+            # Copy the file.
+            shutil.copyfile(bundle_path, target_path)
+        else:
+            raise IOError("Cannot find compiled version of module.")
         click.echo("Installed '{}'.".format(name))
     else:
         click.echo("Unknown module named, '{}'.".format(name))
@@ -1108,6 +1073,12 @@ def main(ctx, verbose, path):  # pragma: no cover
         sys.exit(1)
     global CPY_VERSION
     CPY_VERSION = get_circuitpython_version(device_path)
+    try:
+        CPY_VERSION = VersionInfo.parse(CPY_VERSION)
+    except ValueError as ex:
+        logger.warning("CircuitPython has incorrect semver value.")
+        logger.warning(ex)
+        raise
     click.echo(
         "Found device at {}, running CircuitPython {}.".format(device_path, CPY_VERSION)
     )
@@ -1115,7 +1086,7 @@ def main(ctx, verbose, path):  # pragma: no cover
         "https://github.com/adafruit/circuitpython/releases/latest"
     )
     try:
-        if VersionInfo.parse(CPY_VERSION) < VersionInfo.parse(latest_version):
+        if CPY_VERSION < VersionInfo.parse(latest_version):
             click.secho(
                 "A newer version of CircuitPython ({}) is available.".format(
                     latest_version
@@ -1155,9 +1126,9 @@ def freeze(ctx, requirement):  # pragma: no cover
         click.echo("No modules found on the device.")
 
 
-@main.command()
+@main.command(name="list")
 @click.pass_context
-def list(ctx):  # pragma: no cover
+def list_cli(ctx):  # pragma: no cover
     """
     Lists all out of date modules found on the connected CIRCUITPYTHON device.
     """
@@ -1220,9 +1191,6 @@ def install(ctx, modules, py, requirement, auto, auto_file):  # pragma: no cover
     """
     # TODO: Ensure there's enough space on the device
     available_modules = get_bundle_versions(get_bundles_list())
-    mod_names = {}
-    for module, metadata in available_modules.items():
-        mod_names[module.replace(".py", "").lower()] = metadata
     if requirement:
         cwd = os.path.abspath(os.getcwd())
         requirements_txt = open(cwd + "/" + requirement, "r").read()
@@ -1233,15 +1201,18 @@ def install(ctx, modules, py, requirement, auto, auto_file):  # pragma: no cover
     else:
         requested_installs = modules
     requested_installs = sorted(set(requested_installs))
+    if not requested_installs:
+        click.echo("Nothing to install")
+        return
     click.echo(f"Searching for dependencies for: {requested_installs}")
-    to_install = get_dependencies(requested_installs, mod_names=mod_names)
+    to_install = get_dependencies(requested_installs, available_modules)
     device_modules = get_device_versions(ctx.obj["DEVICE_PATH"])
     if to_install is not None:
         to_install = sorted(to_install)
         click.echo(f"Ready to install: {to_install}\n")
         for library in to_install:
             install_module(
-                ctx.obj["DEVICE_PATH"], device_modules, library, py, mod_names
+                ctx.obj["DEVICE_PATH"], device_modules, library, py, available_modules
             )
 
 
@@ -1280,12 +1251,9 @@ def uninstall(ctx, module):  # pragma: no cover
     for name in module:
         device_modules = get_device_versions(ctx.obj["DEVICE_PATH"])
         name = name.lower()
-        mod_names = {}
-        for module_item, metadata in device_modules.items():
-            mod_names[module_item.replace(".py", "").lower()] = metadata
-        if name in mod_names:
+        if name in device_modules:
             library_path = os.path.join(ctx.obj["DEVICE_PATH"], "lib")
-            metadata = mod_names[name]
+            metadata = device_modules[name]
             module_path = metadata["path"]
             if os.path.isdir(module_path):
                 target = os.path.basename(os.path.dirname(module_path))

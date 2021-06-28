@@ -568,8 +568,12 @@ def test_get_bundle_versions():
     Ensure ensure_latest_bundle is called even if lib_dir exists.
     """
     with mock.patch("circup.ensure_latest_bundle") as mock_elb, mock.patch(
-        "circup.get_modules", return_value={"ok": {"name": "ok"}}
-    ) as mock_gm, mock.patch("circup.CPY_VERSION", "4.1.2"), mock.patch(
+        "circup.get_modules", return_value={"module": {"name": "module"}}
+    ) as mock_gm, mock.patch(
+        "circup.Bundle.requirements", {"module": {"dependencies": []}}
+    ), mock.patch(
+        "circup.CPY_VERSION", "4.1.2"
+    ), mock.patch(
         "circup.Bundle.lib_dir", return_value="foo/bar/lib"
     ), mock.patch(
         "circup.os.path.isdir", return_value=True
@@ -577,7 +581,7 @@ def test_get_bundle_versions():
         bundle = circup.Bundle(TEST_BUNDLE_NAME)
         bundles_list = [bundle]
         assert circup.get_bundle_versions(bundles_list) == {
-            "ok": {"name": "ok", "bundle": bundle}
+            "module": {"name": "module", "bundle": bundle, "dependencies": []}
         }
         mock_elb.assert_called_once_with(bundle)
         mock_gm.assert_called_once_with("foo/bar/lib")
@@ -589,21 +593,25 @@ def test_get_bundle_versions_avoid_download():
     Testing both cases: lib_dir exists and lib_dir doesn't exists.
     """
     with mock.patch("circup.ensure_latest_bundle") as mock_elb, mock.patch(
-        "circup.get_modules", return_value={"ok": {"name": "ok"}}
-    ) as mock_gm, mock.patch("circup.CPY_VERSION", "4.1.2"), mock.patch(
+        "circup.get_modules", return_value={"module": {"name": "module"}}
+    ) as mock_gm, mock.patch(
+        "circup.Bundle.requirements", {"module": {"dependencies": []}}
+    ), mock.patch(
+        "circup.CPY_VERSION", "4.1.2"
+    ), mock.patch(
         "circup.Bundle.lib_dir", return_value="foo/bar/lib"
     ):
         bundle = circup.Bundle(TEST_BUNDLE_NAME)
         bundles_list = [bundle]
         with mock.patch("circup.os.path.isdir", return_value=True):
             assert circup.get_bundle_versions(bundles_list, avoid_download=True) == {
-                "ok": {"name": "ok", "bundle": bundle}
+                "module": {"name": "module", "bundle": bundle, "dependencies": []}
             }
             assert mock_elb.call_count == 0
             mock_gm.assert_called_once_with("foo/bar/lib")
         with mock.patch("circup.os.path.isdir", return_value=False):
             assert circup.get_bundle_versions(bundles_list, avoid_download=True) == {
-                "ok": {"name": "ok", "bundle": bundle}
+                "module": {"name": "module", "bundle": bundle, "dependencies": []}
             }
             mock_elb.assert_called_once_with(bundle)
             mock_gm.assert_called_with("foo/bar/lib")
@@ -802,6 +810,8 @@ def test_ensure_latest_bundle_no_update():
     with mock.patch("circup.Bundle.latest_tag", "12345"), mock.patch(
         "circup.os.path.isfile", return_value=True
     ), mock.patch("circup.os.path.isdir", return_value=True), mock.patch(
+        "circup.os.path.getsize", return_value=100
+    ), mock.patch(
         "circup.open"
     ), mock.patch(
         "circup.get_bundle"
@@ -845,8 +855,11 @@ def test_get_bundle():
         tag = "12345"
         bundle = circup.Bundle(TEST_BUNDLE_NAME)
         circup.get_bundle(bundle, tag)
-        assert mock_requests.get.call_count == 3
-        assert mock_open.call_count == 3
+        # 4 get: each zip, and the dependencies json file
+        assert mock_requests.get.call_count == 4
+        # 5 open: each zip, and write + read the dependencies json
+        assert mock_open.call_count == 5
+        # 3 zip files
         assert mock_shutil.rmtree.call_count == 3
         assert mock_zipfile.ZipFile.call_count == 3
         assert mock_zipfile.ZipFile().__enter__().extractall.call_count == 3
