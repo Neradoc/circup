@@ -781,7 +781,7 @@ def get_dependencies(requested_libraries, available_modules):
     :param object available_modules:  All the modules metadata from bundles
     :return: tuple of module names to install which we build
     """
-    for lib in map(str.lower, requested_libraries):
+    for lib in list(map(str.lower, requested_libraries)):
         # Clean the names and lowercase
         l = clean_library_name(lib)
         if l in NOT_MCU_LIBRARIES:  # this should no longer happen
@@ -887,11 +887,25 @@ def get_requirements(available_modules, library_name):
     """
     deps_list = set()
     if library_name in available_modules:
+        deps_list.add(library_name)
+        # intra-bundle dependencies
         deps = available_modules[library_name]["dependencies"]
         for sub_dep in deps:
             if sub_dep not in deps_list:
                 deps_list |= get_requirements(available_modules, sub_dep)
-            deps_list.add(sub_dep)
+        # external dependencies (might be across bundles or unknown)
+        deps = available_modules[library_name]["external_dependencies"]
+        for sub_dep in deps:
+            for mod in available_modules:
+                if available_modules[mod]["pypi_name"] == sub_dep:
+                    if mod not in deps_list:
+                        deps_list |= get_requirements(available_modules, mod)
+                        break
+            else:
+                # no break == not found
+                dep_name = clean_library_name(sub_dep)
+                if dep_name not in deps_list:
+                    deps_list |= get_requirements(available_modules, dep_name)
     return deps_list
 
 
