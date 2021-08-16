@@ -1244,7 +1244,7 @@ def list_cli(ctx):  # pragma: no cover
 @click.option("--py", is_flag=True)
 @click.option("-r", "--requirement", type=click.Path(exists=True, dir_okay=False))
 @click.option("--auto/--no-auto", "-a/-A")
-@click.option("--auto-file", default="code.py")
+@click.option("--auto-file", default="")
 @click.pass_context
 def install(ctx, modules, py, requirement, auto, auto_file):  # pragma: no cover
     """
@@ -1268,8 +1268,12 @@ def install(ctx, modules, py, requirement, auto, auto_file):  # pragma: no cover
         with open(requirement, "r") as fp:
             requirements_txt = fp.read()
         requested_installs = libraries_from_requirements(requirements_txt)
-    elif auto:
-        auto_file = os.path.join(ctx.obj["DEVICE_PATH"], auto_file)
+    elif auto or auto_file:
+        if not os.path.isabs(auto_file) or not os.path.isfile(auto_file):
+            auto_file = os.path.join(ctx.obj["DEVICE_PATH"], auto_file or "code.py")
+        if not os.path.isfile(auto_file):
+            click.secho(f"Auto file not found: {auto_file}", fg="red")
+            sys.exit(1)
         requested_installs = libraries_from_imports(auto_file, mod_names)
     else:
         requested_installs = modules
