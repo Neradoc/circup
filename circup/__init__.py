@@ -53,7 +53,9 @@ NOT_MCU_LIBRARIES = [
     "pyserial",
 ]
 #: The version of CircuitPython found on the connected device.
-CPY_VERSION = ""
+CPY_VERSION = None
+#: Cutoff version between MPY formats (CP6 versus CP7)
+MPY_CUTOFF_VERSION = VersionInfo.parse("7.0.0-alpha.1")
 #: Module formats list (and the other form used in github files)
 PLATFORMS = {"py": "py", "6mpy": "6.x-mpy", "7mpy": "7.x-mpy"}
 #: Commands that do not require an attached board
@@ -237,7 +239,7 @@ class Module:
         :param str bundle_version: The semver value for the version in bundle.
         :param bool mpy: Flag to indicate if the module is byte-code compiled.
         :param Bundle bundle: Bundle object where the module is located.
-        :param (str,str) compatibility: Min and max versions of CP compatible with the mpy.
+        :param Bool compatibility: is the mpy compatible with CPY_VERSION.
         """
         self.path = path
         if os.path.isfile(self.path):
@@ -252,13 +254,12 @@ class Module:
         self.device_version = device_version
         self.bundle_version = bundle_version
         self.mpy = mpy
-        self.min_version = compatibility[0]
-        self.max_version = compatibility[1]
+        self.compatibility = compatibility
         # Figure out the bundle path.
         self.bundle_path = None
         if self.mpy:
             # Byte compiled, now check CircuitPython version.
-            major_version = CPY_VERSION.split(".")[0]
+            major_version = CPY_VERSION.major
             bundle_platform = "{}mpy".format(major_version)
         else:
             # Regular Python
@@ -281,7 +282,7 @@ class Module:
 
         :return: Truthy indication if the module is out of date.
         """
-        if self.mpy_mismatch:
+        if not self.compatibility:
             return True
         if self.device_version and self.bundle_version:
             try:
@@ -292,34 +293,6 @@ class Module:
                 logger.warning("Module '%s' has incorrect semver value.", self.name)
                 logger.warning(ex)
         return True  # Assume out of date to try to update.
-
-    @property
-    def mpy_mismatch(self):
-        """
-        Returns a boolean to indicate if this module's MPY version is compatible
-        with the board's current version of Circuitpython. A min or max version
-        that evals to False means no limit.
-
-        :return: Boolean indicating if the MPY versions don't match.
-        """
-        if not self.mpy:
-            return False
-        try:
-            cpv = VersionInfo.parse(CPY_VERSION)
-        except ValueError as ex:
-            logger.warning("CircuitPython has incorrect semver value.")
-            logger.warning(ex)
-        try:
-            if self.min_version and cpv < VersionInfo.parse(self.min_version):
-                return True  # CP version too old
-            if self.max_version and cpv >= VersionInfo.parse(self.max_version):
-                return True  # MPY version too old
-        except (TypeError, ValueError) as ex:
-            logger.warning(
-                "Module '%s' has incorrect MPY compatibility information.", self.name
-            )
-            logger.warning(ex)
-        return False
 
     @property
     def major_update(self):
@@ -350,7 +323,7 @@ class Module:
         """
         loc = self.device_version if self.device_version else "unknown"
         rem = self.bundle_version if self.bundle_version else "unknown"
-        if self.mpy_mismatch:
+        if not self.compatibility:
             update_reason = "MPY Format"
         elif self.major_update:
             update_reason = "Major Version"
@@ -390,8 +363,7 @@ class Module:
                 "bundle_version": self.bundle_version,
                 "bundle_path": self.bundle_path,
                 "mpy": self.mpy,
-                "min_version": self.min_version,
-                "max_version": self.max_version,
+                "compatibility": self.compatibility,
             }
         )
 
@@ -513,6 +485,7 @@ def extract_metadata(path):
         for match in re.findall(dunder_key_val, content):
             result[match[0]] = str(match[1])
         if result:
+            result["compatibility"] = True
             logger.info("Extracted metadata: %s", result)
     elif path.endswith(".mpy"):
         result["mpy"] = True
@@ -520,16 +493,16 @@ def extract_metadata(path):
             content = mpy_file.read()
         # Track the MPY version number
         mpy_version = content[0:2]
-        compatibility = None
+        compatibility = False
         # Find the start location of the __version__
         if mpy_version == b"M\x03":
             # One byte for the length of "__version__"
             loc = content.find(b"__version__") - 1
-            compatibility = (None, "7.0.0-alpha.1")
+            compatibility = CPY_VERSION < MPY_CUTOFF_VERSION
         elif mpy_version == b"C\x05":
             # Two bytes in mpy version 5
             loc = content.find(b"__version__") - 2
-            compatibility = ("7.0.0-alpha.1", None)
+            compatibility = CPY_VERSION >= MPY_CUTOFF_VERSION
         if loc > -1:
             # Backtrack until a byte value of the offset is reached.
             offset = 1
@@ -546,8 +519,7 @@ def extract_metadata(path):
                     result = {"__version__": version.decode("utf-8"), "mpy": True}
                     break  # Nothing more to do.
                 offset += 1  # ...and again but backtrack by one.
-        if compatibility:
-            result["compatibility"] = compatibility
+        result["compatibility"] = compatibility
     return result
 
 
@@ -644,7 +616,7 @@ def find_modules(device_path, bundles_list):
                 device_version = device_metadata.get("__version__")
                 bundle_version = bundle_metadata.get("__version__")
                 mpy = device_metadata["mpy"]
-                compatibility = device_metadata.get("compatibility", (None, None))
+                compatibility = device_metadata.get("compatibility", True)
                 result.append(
                     Module(
                         path,
@@ -808,7 +780,13 @@ def get_circuitpython_version(device_path):
         )
         logger.error("boot_out.txt not found.")
         sys.exit(1)
-    return (circuit_python, board_id)
+    try:
+        circuit_python_ver = VersionInfo.parse(circuit_python)
+    except ValueError as ex:
+        logger.warning("CircuitPython has incorrect semver value.")
+        logger.warning(ex)
+
+    return (circuit_python_ver, board_id)
 
 
 def get_dependencies(*requested_libraries, mod_names, to_install=()):
@@ -986,7 +964,7 @@ def install_module(
             if not module_name:
                 # Must be a directory based module.
                 module_name = os.path.basename(os.path.dirname(metadata["path"]))
-            major_version = CPY_VERSION.split(".")[0]
+            major_version = CPY_VERSION.major
             bundle_platform = "{}mpy".format(major_version)
             bundle_path = os.path.join(bundle.lib_dir(bundle_platform), module_name)
             if os.path.isdir(bundle_path):
@@ -1136,9 +1114,16 @@ def main(ctx, verbose, path):  # pragma: no cover
     else:
         device_path = find_device()
     ctx.obj["DEVICE_PATH"] = device_path
-    latest_version = get_latest_release_from_url(
-        "https://github.com/adafruit/circuitpython/releases/latest"
-    )
+    try:
+        latest_version = VersionInfo.parse(
+            get_latest_release_from_url(
+                "https://github.com/adafruit/circuitpython/releases/latest"
+            )
+        )
+    except ValueError as ex:
+        latest_version = VersionInfo.parse("0.0.0")
+        logger.warning("Latest CircuitPython has incorrect semver value.")
+        logger.warning(ex)
     global CPY_VERSION
     if device_path is None:
         click.secho("Could not find a connected CircuitPython device.", fg="red")
@@ -1150,22 +1135,18 @@ def main(ctx, verbose, path):  # pragma: no cover
                 device_path, CPY_VERSION
             )
         )
-    try:
-        if VersionInfo.parse(CPY_VERSION) < VersionInfo.parse(latest_version):
-            click.secho(
-                "A newer version of CircuitPython ({}) is available.".format(
-                    latest_version
-                ),
-                fg="green",
-            )
-            if board_id:
-                url_download = f"https://circuitpython.org/board/{board_id}"
-            else:
-                url_download = "https://circuitpython.org/downloads"
-            click.secho("Get it here: {}".format(url_download), fg="green")
-    except ValueError as ex:
-        logger.warning("CircuitPython has incorrect semver value.")
-        logger.warning(ex)
+    if CPY_VERSION < latest_version:
+        click.secho(
+            "A newer version of CircuitPython ({}) is available.".format(
+                latest_version
+            ),
+            fg="green",
+        )
+        if board_id:
+            url_download = f"https://circuitpython.org/board/{board_id}"
+        else:
+            url_download = "https://circuitpython.org/downloads"
+        click.secho("Get it here: {}".format(url_download), fg="green")
 
 
 @main.command()
@@ -1394,7 +1375,7 @@ def update(ctx, all):  # pragma: no cover
                 if module.repo:
                     click.secho(f"\t{module.repo}", fg="yellow")
             if not update_flag:
-                if module.mpy_mismatch:
+                if not module.compatibility:
                     click.secho(
                         f"WARNING: '{module.name}': mpy format doesn't match the"
                         " device's Circuitpython version. Updating is required.",
