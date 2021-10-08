@@ -55,7 +55,7 @@ NOT_MCU_LIBRARIES = [
 #: The version of CircuitPython found on the connected device.
 CPY_VERSION = None
 #: Cutoff version between MPY formats (CP6 versus CP7)
-MPY_CUTOFF_VERSION = VersionInfo.parse("7.0.0-alpha.1")
+MPY_CUTOFF_VERSION = VersionInfo.parse("7.0.0-0")
 #: Module formats list (and the other form used in github files)
 PLATFORMS = {"py": "py", "6mpy": "6.x-mpy", "7mpy": "7.x-mpy"}
 #: Commands that do not require an attached board
